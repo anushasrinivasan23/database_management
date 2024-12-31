@@ -1,0 +1,493 @@
+---
+title: "Analysis of Wildlife Strikes to Aircraft"
+author: "Anusha Srinivasan"
+date: "Spring 2024"
+output:
+  pdf_document: default
+  html_document: default
+subtitle: Practicum I CS5200
+---
+## Database Connection
+This code block establishes connection to the database so that we can make queries directly from R and retrieve the data from the freemysqlhosting database.
+```{r connectToMySQL, eval = TRUE, warning = FALSE, message = FALSE, echo = FALSE}
+library(DBI)
+library(RMySQL)
+
+# Database connection details: Database Name, Host name, Password, Password, Port number
+dbname <- "Database name"      
+host <- "Host name"
+user <- "User"       
+password <- "Password"           
+
+# Create connection to freemysqlhosting database.
+con <- dbConnect(RMySQL::MySQL(),
+                 dbname = dbname,
+                 host = host,
+                 username = user,
+                 password = password,
+                 port = port)
+print("Connection successful")
+#Disconnecting from the database
+#DBI::dbDisconnect(con)
+```
+
+## Creating the Database Schema
+This creates tables that will hold all the database schema. The database schema has four main tables:
+- `flights table`: Records the flight details. It has unique fId, flight date, the origin airport, the airline name, the aircraft type, and a boolean indicating if it's a heavy aircraft type. It links to the `airports` table through the `originAirport` key.
+- `airports table`: Records airport details. It has a unique aID, name, state, and a default Airport code.
+- `conditions table`: Records sky conditions that can happen during flights and a text explanation for every sky condition.
+- `strikes table`: Records bird strike incidents. It has a unique sid, and fid linking to flights table, number of birds with a default value, impact on the flight, damage, altitude in ft and it also links to the conditions table using cid.
+
+```{r createDatabaseSchema, echo=FALSE, message=FALSE, warning=FALSE}
+library(DBI)
+#creating the flights table
+dbExecute(con, "
+  CREATE TABLE IF NOT EXISTS flights (
+    fId INT AUTO_INCREMENT PRIMARY KEY,
+    date DATE,
+    originAirport INT,
+    airlineName VARCHAR(255),
+    aircraftType VARCHAR(255),
+    isHeavy BOOLEAN,
+    FOREIGN KEY (originAirport) REFERENCES airports(aid)
+  );
+  ")
+#creating the airports table
+dbExecute(con, "
+  CREATE TABLE IF NOT EXISTS airports (
+    aid INT AUTO_INCREMENT PRIMARY KEY,
+    airportName VARCHAR(255),
+    airportState VARCHAR(255),
+    airportCode VARCHAR(3) DEFAULT 'ZZZ'
+  );
+")
+#creating the conditions table
+dbExecute(con, "
+  CREATE TABLE IF NOT EXISTS conditions (
+    cid INT AUTO_INCREMENT PRIMARY KEY,
+    sky_condition VARCHAR(255),
+    explanation TEXT
+  );
+")
+#creating the strikes table
+dbExecute(con, "
+  CREATE TABLE IF NOT EXISTS strikes (
+    sid INT AUTO_INCREMENT PRIMARY KEY,
+    fid INT, 
+    numbirds INT DEFAULT 1,
+    impact TEXT,
+    damage BOOLEAN,
+    altitude INT CHECK (altitude >= 0),
+    conditions INT,
+    FOREIGN KEY (fid) REFERENCES flights(fId),
+    FOREIGN KEY (conditions) REFERENCES conditions(cid)
+  );
+")
+```
+## Database Table Testing
+
+This code block checks the existence of the tables: `flights`, `conditions`, `strikes`, and `airports`. If it exists, print its structure to see the columns in it.
+
+## Checking the Flights Table
+Check if the flights table exists and print the structure
+```{r testFlightsTable, echo= FALSE,eval=FALSE}
+#Check if the table exists
+exists <- dbExistsTable(con, 'flights')
+print(paste('Does flights table exist?', exists))
+#If the table exists print the structure
+if(exists) {
+  structure <- dbGetQuery(con, 'DESCRIBE flights')
+  print(structure)
+}
+```
+## Checking the Conditions Table
+Check if the Conditions table exists and print the structure
+```{r testConditionsTable, echo= FALSE, eval=FALSE}
+#Check if the table exists
+exists <- dbExistsTable(con, 'conditions')
+print(paste('Does conditions table exist?', exists))
+#If the table exists print the structure
+if(exists) {
+  structure <- dbGetQuery(con, 'DESCRIBE conditions')
+  print(structure)
+}
+```
+## Checking the Strikes Table
+Check if the Strikes table exists and print the structure
+```{r testStrikesTable, echo= FALSE,eval=FALSE}
+#Check if the table exists
+exists <- dbExistsTable(con, 'strikes')
+print(paste('Does strikes table exist?', exists))
+#If the table exists print the structure
+if(exists) {
+  structure <- dbGetQuery(con, 'DESCRIBE strikes')
+  print(structure)
+}
+```
+## Checking the Airports Table
+Check if the Airports table exists and print the structure
+```{r testAirportsTable, echo=FALSE, eval=FALSE}
+#Check if the table exists
+exists <- dbExistsTable(con, 'airports')
+print(paste('Does airports table exist?', exists))
+#If the table exists print the structure
+if(exists) {
+  structure <- dbGetQuery(con, 'DESCRIBE airports')
+  print(structure)
+}
+```
+## Loading Bird Strike Data
+
+This code block will load the bird strike data from a CSV file which has records of bird strike incidents like the date, location, airline, and impact of each incident. The CSV data is loaded into the dataframe `bds.raw`.
+
+```{r loadCSV, echo=FALSE, message=FALSE, warning=FALSE}
+# Load the csv birds data into a dataframe
+bds.raw <- read.csv("BirdStrikesData-V3.csv")
+print("CSV File loaded")
+```
+## Inserting data into airports table
+
+This code block inserts value into the `airports` table with data from CSV file. Each airport has a unique aid, name and state, and a default code 'ZZZ' for the airport code.
+```{r insertIntoAirportsTable, eval=TRUE, echo= FALSE,warning=FALSE}
+insert_into_airports <- function(df, con) {
+  #Get the unique airports
+  unique_airports <- unique(df[, c("airport", "origin")])
+  for (i in 1:nrow(unique_airports)) {
+    #Get the airport name and state
+    airport_name <- gsub("'", "''", unique_airports$airport[i], fixed = TRUE)
+    airport_state <- gsub("'", "''", unique_airports$origin[i], fixed = TRUE)
+    # Query to be executed where the airport code is default 'ZZZ'
+    query <- sprintf("INSERT INTO airports (airportName, airportState, airportCode) VALUES ('%s', '%s', 'ZZZ') ON DUPLICATE KEY UPDATE airportName = airportName, airportState = airportState",
+                     airport_name, airport_state)
+    dbExecute(con, query)
+  }
+}
+```
+## Inserting data into conditions table
+
+This code block inserts values into conditions table which has a list of sky conditions. It only adds unique values into the database.
+```{r insertIntoConditionsTable, eval=TRUE,echo= FALSE, warning=FALSE}
+insert_into_conditions <- function(df, con) {
+  #Get the unique conditions
+  unique_conditions <- unique(na.omit(df$sky_conditions))
+  for (condition in unique_conditions) {
+    if (condition != "") {
+      # Query to be executed
+      exist_query <- sprintf("SELECT COUNT(*) as Count FROM conditions WHERE sky_condition = '%s'",
+                             gsub("'", "''", condition, fixed = TRUE))
+      exist_result <- dbGetQuery(con, exist_query)
+      
+      if (exist_result$Count[1] == 0) {
+        insert_query <- sprintf("INSERT INTO conditions (sky_condition) VALUES ('%s')",
+                                gsub("'", "''", condition, fixed = TRUE))
+        dbExecute(con, insert_query)
+      }
+    }
+  }
+}
+```
+
+## Preparing and Inserting Flight Data
+
+The next two code blocks involve adding data from the CSV files and formatting date strings for SQL compatibility.
+
+### Formatting Dates for SQL
+
+This code block converts the date format directly compatible with SQL database. It takes a date string, attempts to parse it into a `Date` object and then format it into a string suitable for SQL.
+```{r formatDateString, eval=TRUE, echo= FALSE,warning=FALSE}
+format_date <- function(date_string) {
+  if (is.na(date_string)) {
+    return(NA)
+  }
+  tryCatch({
+    # Change the format of date
+    parsed_date <- as.Date(strptime(date_string, format = "%m/%d/%Y %H:%M"))
+    if (!is.na(parsed_date)) {
+      formatted_date <- format(parsed_date, "%Y-%m-%d")
+    } else {
+      return(NA)
+    }
+    return(formatted_date)
+  }, error = function(e) {
+    # Return NA if the date format is not correct
+    return(NA)
+  })
+}
+```
+
+### Inserting Flight Records
+
+The code block is used to insert the data into the flights table like the fId, date, origin airport, airline name, aircraft type, isHeavy Flag details.
+```{r insertIntoFlightsTable, eval=TRUE,echo= FALSE, warning=FALSE}
+insert_into_flights <- function(df, con) {
+  # Skip if the airport name or state is unknown
+  for (i in 1:nrow(df)) {
+    if (df$origin[i] == "unknown" || df$airport[i] == "unknown") {
+      next 
+    }
+    
+    # Get the reference airport name and state
+    airport_query <- sprintf("SELECT aid FROM airports WHERE airportName = '%s' AND airportState = '%s'",
+                             gsub("'", "''", df$airport[i], fixed = TRUE),
+                             gsub("'", "''", df$origin[i], fixed = TRUE))
+    airport_result <- dbGetQuery(con, airport_query)
+    
+    if (nrow(airport_result) == 0) {
+      warning(sprintf("No airport found for row %d.", i))
+      next
+    }
+    
+    airport_id <- airport_result$aid
+    airline <- gsub("'", "''", df$airline[i], fixed = TRUE)
+    aircraft <- gsub("'", "''", df$aircraft[i], fixed = TRUE)
+    is_heavy <- ifelse(df$heavy_flag[i] == "Yes", 'TRUE', 'FALSE')
+
+    # Change the format of the date
+  flight_date <- format_date(df$flight_date[i])
+    if (is.na(flight_date)) {
+      warning(sprintf("Invalid date for row %d.", i))
+      next
+    }
+  #Execute the query and insert flight_date, airport_id, airline, aircraft, is_heavy values
+    query <- sprintf("INSERT INTO flights (date, originAirport, airlineName, aircraftType, isHeavy) VALUES ('%s', %d, '%s', '%s', %s)",
+                     flight_date, airport_id, airline, aircraft, is_heavy)
+    
+    tryCatch({
+      dbExecute(con, query)
+    }, error = function(e) {
+      warning(sprintf("Failed to insert for row %d: %s", i, e$message))
+    })
+  }
+}
+```
+
+## Preparing and Inserting Strikes Data
+
+The next three code blocks involve adding strikes data from the CSV files and retrieve the fId and cId from the flighst and conditions table.
+
+### Lookup Flight ID Function
+This code block queries the database to find the flight ID (fid) associated with a given airport name to linking strike incidents to flights based on the airport's name.
+```{r lookupFid, eval=FALSE, echo= FALSE, warning=FALSE}
+library(dplyr)
+library(DBI)
+lookup_fid <- function(con, airport_name) {
+  #Query to be executed
+  query <- sprintf("SELECT f.fid FROM flights f JOIN airports a ON f.originAirport = a.aid WHERE a.airportName = '%s' LIMIT 1",
+                   gsub("'", "''", airport_name))
+  result <- dbGetQuery(con, query)
+  
+  if (nrow(result) > 0) {
+    # Return the first fid
+    return(result$fid[1]) 
+  } else {
+    # Return NA if no fid found
+    return(NA) 
+  }
+}
+```
+
+### Lookup Condition ID Function
+This code block queries the database to find the condition ID (cid) based on sky conditions to link strike incidents with sky conditions recorded in the conditions table.
+```{r lookupCid, eval=TRUE,echo= FALSE, warning=FALSE}
+lookup_cid <- function(con, sky_conditions) {
+  #Query to be executed
+  query <- sprintf("SELECT cid FROM conditions WHERE sky_condition = '%s' LIMIT 1",
+                   gsub("'", "''", sky_conditions)) # Escape single quotes for SQL
+  result <- dbGetQuery(con, query)
+  
+  if (nrow(result) > 0) {
+    # Return the first cid found
+    return(result$cid[1]) 
+  } else {
+     # Return NA if no cid found
+    return(NA)
+  }
+}
+```
+
+### Inserting Data into Strikes Table
+This code block uses the lookup_fid and lookup_cid functions and inserts bird strike incident data into the strikes table. 
+```{r insertIntoStrikesTable, eval=TRUE, echo= FALSE, warning=FALSE}
+
+insert_into_strikes <- function(df, con) {
+  for(i in 1:nrow(df)) {
+     # Matches the name of the airport column
+    fid <- lookup_fid(con, df$airport[i])
+    # Matches the name of the sky conditions column
+    cid <- lookup_cid(con, df$sky_conditions[i]) 
+
+    # Skip the row if fid or cid is not found 
+    if (is.na(fid) || is.na(cid)) {
+      warning(sprintf("No matching flight ID or condition ID found for row %d", i))
+      next 
+    }
+    impact <- gsub("'", "''", df$impact[i], fixed = TRUE)
+    damage_value <- ifelse(tolower(df$damage[i]) == "damage", 'TRUE', 'FALSE')
+    altitude <- ifelse(is.na(df$altitude_ft[i]) || df$altitude_ft[i] < 0, 0, df$altitude_ft[i])
+
+    # Check for Altitude to be numeric
+    if (!is.numeric(altitude)) {
+      altitude <- as.numeric(altitude)
+    }
+
+    # Check altitude is not NA 
+    if (is.na(altitude) || is.null(altitude)) {
+      altitude <- 0 
+    }
+    numbirds <- 0
+    # Ensure fid and cid are integers
+    fid <- as.integer(fid)
+    cid <- as.integer(cid)
+    query <- sprintf("INSERT INTO strikes (fid, numbirds, impact, damage, altitude, conditions) VALUES (%s, %d, '%s', %s, %s, %s)",
+                     ifelse(is.na(fid), "NULL", as.character(fid)), 
+                     numbirds,  # Inserting default value for number of birds
+                     impact, 
+                     damage_value, 
+                     ifelse(is.na(altitude), "NULL", as.character(altitude)), 
+                     ifelse(is.na(cid), "NULL", as.character(cid)))
+    tryCatch({
+      dbExecute(con, query)
+    }, error = function(e) {
+      warning(sprintf("Failed to insert for row %d: %s", i, e$message))
+    })
+  }
+}
+```
+
+## Function calls for inserting Data into the Tables
+
+This code block has the function calls from the above code chunks to insert data into the CSV file
+```{r insertDatafromCSV , eval=FALSE, echo=FALSE, message=FALSE, warning=FALSE}
+# Replace empty strings or NA values with "unknown"
+colnames(bds.raw)
+bds.raw[bds.raw == ""] <- NA
+bds.raw[is.na(bds.raw)] <- "unknown"
+# Insert data into each table
+insert_into_airports(bds.raw, con)
+insert_into_conditions(bds.raw, con)
+insert_into_flights(bds.raw, con)
+insert_into_strikes(bds.raw, con)
+```
+
+## Testing the loading of the data into tables
+This code block tests if the loading of data into the tables was successful by displaying the ifrst five rows of every table
+```{r testloading, eval = FALSE , warning = FALSE, echo=FALSE}
+# Display first 5 rows of all the tables
+print(dbGetQuery(con, "SELECT * FROM airports LIMIT 5"))
+ 
+print(dbGetQuery(con, "SELECT * FROM conditions LIMIT 5"))
+ 
+print(dbGetQuery(con, "SELECT * FROM flights LIMIT 5"))
+ 
+print(dbGetQuery(con, "SELECT * FROM strikes LIMIT 5"))
+```
+## Top Airports with Strike
+This code block gives the top 10 states with the greatest number of bird strike incidents
+```{r topAirportsWithStrike, eval = TRUE, warning = FALSE, echo=FALSE}
+## Top 10 Airports with Strikes
+query <- "
+SELECT airportState, COUNT(*) AS numIncidents
+FROM airports
+JOIN flights ON airports.aid = flights.originAirport
+JOIN strikes ON flights.fid = strikes.fid
+GROUP BY airportState
+ORDER BY numIncidents DESC
+LIMIT 10
+"
+top_states <- dbGetQuery(con, query)
+print(top_states)
+```
+## Analysis by Airline
+This code block gives the top airlines that had an above average number bird strike incidents. 
+```{sql connection=con, eval = T, warning = F, echo=FALSE}
+
+SELECT airlineName, COUNT(*) AS NumberOfIncidents
+  FROM flights
+  JOIN strikes ON flights.fid = strikes.fid
+  GROUP BY airlineName
+  HAVING COUNT(*) > (
+    SELECT AVG(IncidentCount) FROM (
+      SELECT COUNT(*) AS IncidentCount
+      FROM flights
+      JOIN strikes ON flights.fid = strikes.fid
+      GROUP BY airlineName
+    ) AS AvgIncidents
+  )
+  ORDER BY NumberOfIncidents DESC;
+
+```
+
+## Analysis by month
+This code block gives the total number of wildlife strikes by month.
+```{r analysisByMonth, eval = TRUE, warning = FALSE, echo=FALSE}
+library(dplyr, warn.conflicts = FALSE)
+query <- "
+SELECT MONTH(date) AS month, COUNT(*) AS num_strikes
+FROM flights
+GROUP BY MONTH(date)
+ORDER BY MONTH(date)
+"
+#Dataframe is used to store the query
+monthly_strikes <- dbGetQuery(con, query)
+# Converting the month numbers to month names
+monthly_strikes$month <- month.abb[monthly_strikes$month]
+print(monthly_strikes)
+```
+## Trend by month
+This code block gives how wildlife strikes vary by month
+```{r trendByMonth,fig.align='center' eval = TRUE, warning = FALSE, echo=FALSE}
+months_ordered <- factor(monthly_strikes$month, levels = month.abb)
+# Generate bar plot
+bp <- barplot(monthly_strikes$num_strikes, names.arg = months_ordered, 
+              main = "Strikes by Month", 
+              xlab = "Month", 
+              ylab = "Number of Strikes",
+              col = "green")
+text(x = bp, y = monthly_strikes$num_strikes, labels = monthly_strikes$num_strikes, pos = 3, cex = 0.8)
+
+
+```
+
+## Audit Logging 
+This code block creates an audit_log table designed to track modifications within the database, specifically deletions from the strikes table.
+```{r storedProcedure, echo=FALSE}
+# Creating a Audit Log Table
+dbExecute(con, "
+  CREATE TABLE IF NOT EXISTS audit_log (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    modification_type VARCHAR(255),
+    modified_table VARCHAR(255),
+    modification_timestamp DATETIME,
+    record_id INT,
+    description TEXT
+  )
+")
+dbExecute(con, "DROP PROCEDURE IF EXISTS RemoveStrike")
+# Creating a Stored Procedure for Removing a Strike
+dbExecute(con, "
+  CREATE PROCEDURE RemoveStrike(IN strikeID INT)
+  BEGIN
+    INSERT INTO audit_log (modification_type, modified_table, modification_timestamp, record_id, description)
+    VALUES ('Deletion', 'strikes', NOW(), strikeID, CONCAT('Deleted strike with ID ', strikeID));
+
+    DELETE FROM strikes WHERE sid = strikeID;
+  END
+")
+
+# Invoke the stored procedure with a specific strike ID to remove
+strikeIDToRemove <- 1 
+dbExecute(con, sprintf("CALL RemoveStrike(%d)", strikeIDToRemove))
+
+# Get recent entries in the audit log
+auditLog <- dbGetQuery(con, "SELECT * FROM audit_log ORDER BY modification_timestamp DESC LIMIT 5")
+print(auditLog)
+
+#Test to check if the function
+latest_audit_log_entry <- dbGetQuery(con, "
+SELECT * FROM audit_log 
+WHERE record_id = @test_strike_id 
+ORDER BY modification_timestamp DESC LIMIT 1;
+")
+print(latest_audit_log_entry)
+```
+
