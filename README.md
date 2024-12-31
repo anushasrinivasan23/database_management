@@ -1,5 +1,5 @@
 
-### **README for Building a Relational Database for Bird Strike Insights with MySQL and R**
+### ** Building a Relational Database for Bird Strike Insights with MySQL and R**
 
 ---
 
